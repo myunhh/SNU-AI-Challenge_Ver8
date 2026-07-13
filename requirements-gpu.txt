@@ -3,7 +3,8 @@
 -r requirements.txt
 bitsandbytes>=0.45.0
 torchvision               # Qwen3-VL AutoProcessor의 video sub-processor가 로딩 시점에 요구
-trl>=0.13.0              # DPO/GRPO 단계에서 사용
 # flash-attn                 # 선택: 빌드 실패 시 SDPA로 자동 폴백 (engine.py)
 # unsloth                    # 선택: 학습 가속 (train_sft.py --unsloth)
 # optimum-quanto             # 선택: quantized KV cache (engine.py kv_quant)
+# trl                        # 미사용: DPO는 score24 단일토큰 구조를 살려 자체 구현
+                             # (train_dpo.py — TRL DPOTrainer의 멀티턴 생성 전제가 불필요)

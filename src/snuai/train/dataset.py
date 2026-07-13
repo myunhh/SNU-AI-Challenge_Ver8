@@ -29,6 +29,7 @@ class SFTDatasetConfig:
     legend: bool = True                # Ver3: A~X↔순열 범례 명시 (학습=추론 프롬프트 일치)
     verify_ratio: float = 0.0          # 보조 검증 태스크 비율 (0.1~0.2 권장 실험 범위)
     epoch_multiplier: int = 1          # 가상 확장 배수(순열 증강 24배 활용 시 >1)
+    soft_label_temperature: float | None = None  # metric-aligned soft SFT (TODO §2b, 기본 OFF)
     seed: int = 20260709
 
 
@@ -65,13 +66,17 @@ class Score24SFTDataset:
             aug.caption, aug.images, video_mode=self.cfg.video_mode,
             counterfactual=self.cfg.counterfactual, legend=self.cfg.legend,
             dup_factor=self.cfg.video_dup_factor)
-        return {
+        item = {
             "messages": messages,
             "target_text": perm.letter_of_rank(aug.rank),
             "task": "score24",
             "sample_id": base.id,
             "rank": aug.rank,
         }
+        if self.cfg.soft_label_temperature is not None:
+            item["soft_target"] = perm.soft_target_distribution(
+                aug.rank, self.cfg.soft_label_temperature)
+        return item
 
     def _verify_item(self, aug: Sample, rng: random.Random) -> dict:
         """보조 태스크: 50% 확률로 '시간순 정렬본'(Yes) / '오배열본'(No) 제시."""
@@ -97,6 +102,12 @@ class SFTCollator:
     이미지 placeholder가 processor 단계에서 확장되므로 프롬프트 길이를 미리 알 수
     없기 때문에, target을 끝에 붙이고 끝에서부터 마스킹하는 방식이 유일하게 안전.
     검증: 마스킹된 위치의 input_ids가 target 토큰과 일치하는지 assert.
+
+    soft_target이 실린 아이템(dataset의 soft_label_temperature, TODO §2b)이 있으면
+    글자 위치는 hard label에서 제외(-100)하고 letter_token_ids/soft_targets/
+    answer_pos를 enc에 추가 — 실제 soft CE 계산은 train_dpo.py 스타일의 커스텀
+    Trainer(SoftLabelTrainer, train_sft.py)가 담당한다. train_on_eos=False와는
+    양립 불가(letter 위치가 유일한 학습 타깃이라 마스킹하면 labels가 전부 -100).
     """
 
     def __init__(self, processor, train_on_eos: bool = True):
@@ -105,12 +116,32 @@ class SFTCollator:
         self.processor = processor
         self.tokenizer = getattr(processor, "tokenizer", processor)
         self.train_on_eos = train_on_eos
+        self._letter_token_ids: list[int] | None = None
+
+    def _compute_letter_token_ids(self) -> list[int]:
+        if self._letter_token_ids is not None:
+            return self._letter_token_ids
+        from .. import perm
+        ids = []
+        for ch in perm.LETTERS24:
+            for cand in (ch, " " + ch):
+                cids = self.tokenizer.encode(cand, add_special_tokens=False)
+                if len(cids) == 1:
+                    ids.append(cids[0])
+                    break
+            else:
+                raise ValueError(f"단일 토큰이 아님: {ch!r}")
+        if len(set(ids)) != 24:
+            raise ValueError("라벨 토큰 id 충돌 — 토크나이저 확인 필요")
+        self._letter_token_ids = ids
+        return ids
 
     def __call__(self, batch: list[dict]):
         torch = self.torch
         from ..prompting import call_processor, extract_media
 
         texts, images, videos, target_ids_list = [], [], [], []
+        soft_targets, answer_positions = [], []
         for item in batch:
             prompt = self.processor.apply_chat_template(
                 item["messages"], tokenize=False, add_generation_prompt=True)
@@ -120,6 +151,11 @@ class SFTCollator:
                 t_ids = t_ids + [self.tokenizer.eos_token_id]
             texts.append(prompt + item["target_text"] + (eos if self.train_on_eos else ""))
             target_ids_list.append(t_ids)
+            if "soft_target" in item:
+                if not (self.train_on_eos and eos):
+                    raise ValueError("soft_target은 train_on_eos=True(EOS 존재)에서만 지원됨 "
+                                     "— 그렇지 않으면 hard label이 전부 마스킹되어 labels가 없어짐")
+                soft_targets.append(item["soft_target"])
             im, vi = extract_media(item["messages"])
             images.extend(im)
             videos.extend(vi)
@@ -140,5 +176,14 @@ class SFTCollator:
             if got != t_ids:
                 raise ValueError(f"라벨 정렬 실패: 끝 토큰 {got} ≠ target {t_ids}")
             labels[b, start:end] = input_ids[b, start:end]
+            if "soft_target" in batch[b]:
+                answer_positions.append(start)     # letter 토큰 위치(0-based, 시퀀스 내)
+                labels[b, start] = -100             # letter는 soft loss가 전담(hard와 중복 방지)
         enc["labels"] = labels
+        if soft_targets:
+            if len(soft_targets) != len(batch):
+                raise ValueError("배치 내 일부만 soft_target을 가짐 — dataset 설정이 섞여 있음")
+            enc["soft_targets"] = torch.tensor(soft_targets, dtype=torch.float32)
+            enc["answer_pos"] = torch.tensor(answer_positions, dtype=torch.long)
+            enc["letter_token_ids"] = torch.tensor(self._compute_letter_token_ids(), dtype=torch.long)
         return enc

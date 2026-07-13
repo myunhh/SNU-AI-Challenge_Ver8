@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 import random
 from typing import Iterable, Sequence
 
@@ -185,6 +186,23 @@ def pairwise_score(r1: Sequence[int], r2: Sequence[int]) -> float:
     LB 0.82373). EM 게이트가 놓친 LB 이득을 잡기 위한 병행 지표.
     """
     return 1.0 - kendall_tau_distance(r1, r2) / (N * (N - 1) / 2)
+
+
+def soft_target_distribution(true_rank: Sequence[int], temperature: float) -> list[float]:
+    """metric-aligned soft label — pairwise_score 커널로 스무딩한 24클래스 타깃 분포.
+
+    p(q) ∝ exp(pairwise_score(true_rank, q) / T). T→0이면 true_rank에 원핫으로
+    수렴(EM SFT와 동일), T→∞면 균등분포. LB가 부분점수(쌍순서) 채점일 때만
+    one-hot 대신 쓸 이유가 있다(TODO §2b) — EM 채점이면 이 함수는 불필요.
+    """
+    if temperature <= 0:
+        raise ValueError(f"temperature는 양수여야 함: {temperature}")
+    true_rank = _check(true_rank, "true_rank")
+    weights = [pairwise_score(true_rank, q) / temperature for q in PERMS24]
+    m = max(weights)
+    exps = [math.exp(w - m) for w in weights]
+    z = sum(exps)
+    return [e / z for e in exps]
 
 
 def adjacent_swap_ranks(rank: Sequence[int]) -> list[Perm]:

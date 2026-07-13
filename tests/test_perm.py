@@ -82,3 +82,26 @@ def test_partial_credit_scores():
         a, b = perm.random_shuffle(rng), perm.random_shuffle(rng)
         assert perm.pairwise_score(a, b) == perm.pairwise_score(b, a)
         assert perm.position_score(a, b) == perm.position_score(b, a)
+
+
+def test_soft_target_distribution_is_simplex_peaked_at_truth():
+    true_rank = (2, 0, 3, 1)
+    dist = perm.soft_target_distribution(true_rank, temperature=0.02)
+    assert len(dist) == 24
+    assert abs(sum(dist) - 1.0) < 1e-9
+    assert all(p >= 0 for p in dist)
+    # 낮은 온도에서는 true_rank 자신의 확률이 압도적으로 커야 함(유일한 최댓값)
+    assert dist[perm.index_of(true_rank)] == max(dist)
+    assert dist[perm.index_of(true_rank)] > 0.9
+
+
+def test_soft_target_distribution_uniform_at_high_temperature():
+    true_rank = (2, 0, 3, 1)
+    dist = perm.soft_target_distribution(true_rank, temperature=1000.0)
+    assert all(abs(p - 1 / 24) < 1e-3 for p in dist)
+
+
+def test_soft_target_distribution_rejects_nonpositive_temperature():
+    import pytest
+    with pytest.raises(ValueError):
+        perm.soft_target_distribution((0, 1, 2, 3), temperature=0.0)

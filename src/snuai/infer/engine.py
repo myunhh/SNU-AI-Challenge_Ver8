@@ -110,6 +110,13 @@ class VLMEngine:
         apply_pixel_budget(self.processor, self.cfg.max_pixels, self.cfg.min_pixels,
                           video_max_pixels=self.cfg.video_max_pixels)
 
+    def _is_prequantized(self) -> bool:
+        """체크포인트 config.json에 quantization_config가 내장돼 있는지 (train_sft와 동일 규약)."""
+        from transformers import AutoConfig
+        cfg = AutoConfig.from_pretrained(self.cfg.model_id,
+                                         trust_remote_code=self.cfg.trust_remote_code)
+        return getattr(cfg, "quantization_config", None) is not None
+
     def _load_model(self):
         import torch
         from transformers import AutoModelForImageTextToText
@@ -119,6 +126,26 @@ class VLMEngine:
             kw["dtype"] = getattr(torch, self.cfg.dtype)
         elif self.device == "cuda":
             kw["dtype"] = torch.bfloat16
+
+        # 사전양자화 체크포인트(config.json에 quantization_config 내장 — unsloth 32B-bnb-4bit 등)
+        # 자동 감지: from_pretrained가 알아서 4bit로 로드하므로 four_bit 플래그는 불필요하고,
+        # 4bit 모델은 .to(device) 금지라 device_map으로 배치해야 한다 (아래 .to() 분기가 스킵됨).
+        if self._is_prequantized():
+            if self.cfg.four_bit:
+                raise RuntimeError("사전양자화 체크포인트에 four_bit=True 중복 지정 — "
+                                   "이중 양자화 사고 방지를 위해 플래그를 제거할 것")
+            if self.device != "cuda":
+                raise RuntimeError("사전양자화(bnb 4bit) 체크포인트는 CUDA 전용")
+            # 체크포인트 자체 quantization_config의 vision 스킵이 bare name이면 이 버전의
+            # transformers에서 vision까지 4bit로 재양자화된다(_check_vision_not_quantized가
+            # 잡는 지점) — train.qlora와 동일하게 model.visual 접두형으로 보정.
+            from transformers import AutoConfig
+            from ..train.qlora import patch_prequant_vision_skip
+            auto_cfg = AutoConfig.from_pretrained(
+                self.cfg.model_id, trust_remote_code=self.cfg.trust_remote_code)
+            patch_prequant_vision_skip(auto_cfg)
+            kw["config"] = auto_cfg
+            kw["device_map"] = "auto"
 
         if self.cfg.four_bit:
             if self.device != "cuda":

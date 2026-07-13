@@ -47,6 +47,36 @@ def lora_targets_of_model(model) -> list[str]:
 VISION_SKIP_MODULES = ["model.visual"]
 
 
+def patch_prequant_vision_skip(config) -> bool:
+    """사전양자화 체크포인트의 llm_int8_skip_modules를 vision 비양자화가 되도록 보정.
+
+    unsloth `Qwen3-VL-32B-Instruct-bnb-4bit` 등은 quantization_config에
+    vision 스킵을 bare name(`visual`/`vision_tower`)으로 넣어두는데, transformers
+    5.x `should_convert_module()`은 re.match 앵커링이라 `model.visual.*` 실경로에
+    안 걸린다 → vision tower가 로드 시 4bit로 재양자화됨(체크포인트엔 bf16으로
+    저장돼 있는데도). 규약(vision 비양자화)에 맞게 VISION_SKIP_MODULES(`model.`
+    접두형)를 skip 목록에 in-place로 추가한다. `should_convert_module`은 스킵
+    목록의 OR라 기존 항목을 지우지 않고 더하기만 하면 안전하다 (Ver4 실측 이식).
+
+    반환: 실제로 보정했으면 True (양자화 config 없으면 False).
+    """
+    q = getattr(config, "quantization_config", None)
+    if q is None:
+        return False
+    is_dict = isinstance(q, dict)
+    skips = list((q.get if is_dict else lambda k, d=None: getattr(q, k, d))(
+        "llm_int8_skip_modules") or [])
+    added = [m for m in VISION_SKIP_MODULES if m not in skips]
+    if not added:
+        return False
+    skips.extend(added)
+    if is_dict:
+        q["llm_int8_skip_modules"] = skips
+    else:
+        q.llm_int8_skip_modules = skips
+    return True
+
+
 def make_bnb_kwargs() -> dict:
     """BitsAndBytesConfig 인자 (노션 QLoRA 항목: NF4 + double quant + bf16 compute + vision 스킵)."""
     return dict(load_in_4bit=True, bnb_4bit_quant_type="nf4",
