@@ -1,0 +1,9 @@
+# GPU 전용 (3090 / VESSL) — 학습·양자화 추론용
+# ⚠️ 3090과 VESSL의 버전을 반드시 일치시킬 것 (노션 결정사항)
+-r requirements.txt
+bitsandbytes>=0.45.0
+torchvision               # Qwen3-VL AutoProcessor의 video sub-processor가 로딩 시점에 요구
+trl>=0.13.0              # DPO/GRPO 단계에서 사용
+# flash-attn                 # 선택: 빌드 실패 시 SDPA로 자동 폴백 (engine.py)
+# unsloth                    # 선택: 학습 가속 (train_sft.py --unsloth)
+# optimum-quanto             # 선택: quantized KV cache (engine.py kv_quant)

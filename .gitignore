@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+runs/
+preproc/
+nohup.out
+.pytest_cache/
+
+# 데이터는 커밋 제외 — 단 로더(adapter.py)는 코드이므로 포함
+/data/*
+!/data/adapter.py
+
+# 주의: tests/ 를 여기 넣지 말 것 — Ver1에서 테스트 소스 유실 사고의 원인

@@ -1,0 +1,11 @@
+# Core (CPU-testable) — laptop/CI에서 검증 가능한 최소 스택
+numpy
+pillow
+pytest
+torch
+transformers>=4.57.0     # qwen3_vl 지원 버전
+accelerate
+peft
+datasets
+huggingface_hub
+safetensors
