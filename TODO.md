@@ -10,13 +10,13 @@
 
 ---
 
-## §0. 부트스트랩 (코드 작성 없이 복사·링크만, ~30분)
+## §0. 부트스트랩 (코드 작성 없이 복사·링크만, ~30분) — ✅ 완료 2026-07-13
 
-- [ ] Ver7 코드 복사: `src/ scripts/ tests/ conftest.py pyproject.toml requirements*.txt`
+- [x] Ver7 코드 복사: `src/ scripts/ tests/ conftest.py pyproject.toml requirements*.txt`
   (Ver7의 dup=1 경로가 Ver3와 byte-identical + 신규 도구 superset이라 Ver7이 베이스)
-- [ ] `data/` 구성: Ver7과 동일하게 공유본 심볼릭 링크 + `adapter.py` 복사
-- [ ] `pytest tests/ -q` 55개 통과 확인 (환경 함정 2개는 CLAUDE.md 참고)
-- [ ] `runs/` gitignore, git init (본선 검증자료 관례)
+- [x] `data/` 구성: Ver7과 동일하게 공유본 심볼릭 링크 + `adapter.py` 복사
+- [x] `pytest tests/ -q` 55개 통과 확인 (환경 함정 2개는 CLAUDE.md 참고)
+- [x] `runs/` gitignore, git init (본선 검증자료 관례) — 로컬 git repo만, 원격 미연결
 
 ## §1. 채점 방식 확정 — ⚠️ 최우선, §2의 지표 선택이 여기 걸림
 
