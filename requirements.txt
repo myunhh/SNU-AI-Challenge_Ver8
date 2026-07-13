@@ -9,3 +9,4 @@ peft
 datasets
 huggingface_hub
 safetensors
+kagglehub                # data_download.py (fresh clone에서 data/ 자동 확보)
