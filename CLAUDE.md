@@ -18,10 +18,15 @@ python -m snuai.train.train_dpo --adapter runs/sft32b_v4/adapter_final --no-hard
 python -m snuai.infer.predict --csv data/test.csv --image-dir data/test \
     --strategy score24 --adapter <dpo checkpoint> --tta 3 --out runs/test_v8
 
-# 멀티GPU(DDP, 2026-07-16 추가) — device_map을 PartialState().process_index로 고정해
-# torchrun/accelerate 멀티프로세스에서 각 rank가 자기 GPU에만 올라감 (단일프로세스는 기존과 동일)
+# 멀티GPU(DDP, 2026-07-16) — device_map을 rank의 로컬 GPU로 고정, HF Trainer가 DDP 처리.
+# --grad-accum(기본16)은 **전역** 누적으로 해석해 world_size로 나눔 → 유효배치는 단일GPU와
+# 동일(=현 챔피언 레시피 그대로)하고 스텝당 forward가 rank로 분산돼 ~world_size배 빨라짐.
+# 즉 2장으로 "2000스텝"은 단일GPU 2000스텝과 같은 데이터/배치를 절반 wall-clock에 처리.
 torchrun --nproc_per_node=2 -m snuai.train.train_dpo --adapter runs/sft32b_v4/adapter_final \
     --max-steps 2000 --save-steps 200 --out runs/dpo_v8_ddp
+# 현 챔피언(ckpt200)은 --no-hard-negative였음. DDP도 --no-hard-negative가 가장 단순·안전
+# (records를 rank마다 동일하게 독립 생성, 스코어링 배리어 없음). --hard-negative를 쓰면
+# rank0가 수십 분 스코어링하는 동안 다른 rank가 배리어 대기 → PG timeout 2h로 견디게 해둠.
 ```
 
 ## 저장소 구조
@@ -37,7 +42,12 @@ torchrun --nproc_per_node=2 -m snuai.train.train_dpo --adapter runs/sft32b_v4/ad
 
 ## 이 버전 고유 함정
 
-- DPO 참조 로그확률은 별도 참조모델 없이 `model.disable_adapter()`로 얻음(reference-free, 메모리 절약).
+- DPO 참조 로그확률은 별도 참조모델 없이 `disable_adapter()`로 얻음(reference-free, 메모리 절약).
+  ⚠️ **DDP에서 `model`은 `DistributedDataParallel` 래퍼라 `.disable_adapter()`가 없다**(래퍼는 이
+  메서드를 forward하지 않음) → `model.disable_adapter()`는 AttributeError로 첫 스텝 크래시. 반드시
+  `self.accelerator.unwrap_model(model).disable_adapter()`로 내부 PeftModel을 꺼내 호출해야 한다(TRL
+  DPOTrainer도 동일). 단일프로세스에선 model이 PeftModel이라 원래도 동작했어서 이 버그가 안 드러났던 것
+  (2026-07-16 재검토로 발견·수정). 참조 forward는 no_grad라 DDP를 안 거쳐도 결과 동일.
 - `--hard-negative`(기본 on) 사전 스코어링이 로컬 4090에서 8,600건 순회에 80분+ 걸려 사실상 못 돎 —
   A100 또는 `--no-hard-negative`(스코어링 스킵, 무작위 rejected) 필요.
 - **DDP(멀티GPU)에서 hard-negative 스코어링은 rank0만 수행**(그 비싼 forward pass를 world_size배
@@ -52,6 +62,15 @@ torchrun --nproc_per_node=2 -m snuai.train.train_dpo --adapter runs/sft32b_v4/ad
   비운다(단일프로세스·DDP rank0 양쪽 다 수정). 특히 DDP에서 안 고쳤으면 rank0가 스코어링 엔진 메모리를
   들고 있는 채로 그 위에 학습용 모델을 또 올려야 해서, VRAM이 빠듯하면 rank0 학습 모델 로딩 시점에
   OOM 위험이 있었다.
-- **잔여 리스크(코드로 못 막음)**: rank0가 hard-negative 스코어링 도중 죽으면 다른 rank는
-  `state.wait_for_everyone()`에서 NCCL 기본 타임아웃까지 대기 — 오래 멈춘 것 같으면 rank0 로그부터
-  확인할 것. 본런 전에 반드시 스모크(몇 스텝)로 DDP 경로가 실제로 도는지 먼저 확인 권장.
+- **⚠️ 2026-07-16 재검토로 발견·수정된 NCCL 배리어 타임아웃**: `--hard-negative` DDP 경로에서 rank0가
+  수십 분 스코어링하는 동안 다른 rank는 `state.wait_for_everyone()`(NCCL 배리어)에서 대기하는데, NCCL
+  워치독 **기본 타임아웃(~10분)**이면 스코어링이 끝나기 전에 그 배리어가 타임아웃돼 죽는다. main()
+  진입 시 프로세스그룹을 **직접 `timeout=2h`로 초기화**(그 뒤 PartialState/HF Trainer가 재사용)해서
+  스코어링을 견디게 고쳤다. `--no-hard-negative`면 스코어링 자체가 없어 이 경로를 안 탐(가장 안전).
+- **유효배치/속도(2026-07-16)**: `--grad-accum`을 world_size로 나눠 per-device 누적으로 넘긴다 — HF
+  Trainer+DDP는 rank 간 grad를 평균하므로, 안 나누면 유효배치가 world_size배가 되고(다른 레시피) 스텝당
+  forward도 그대로라 wall-clock이 안 빨라진다. 나누면 유효배치는 단일GPU와 동일하고 스텝이 실제로
+  빨라진다. 2x 배치를 원하면 `--grad-accum`을 2배로.
+- **잔여 리스크(코드로 못 막음)**: rank0가 스코어링/저장 도중 죽으면 다른 rank는 배리어에서 PG
+  타임아웃(2h)까지 대기 — 오래 멈춘 것 같으면 rank0 로그부터 확인할 것. 본런 전에 반드시 스모크(몇
+  스텝)로 DDP 경로가 실제로 도는지 먼저 확인 권장.

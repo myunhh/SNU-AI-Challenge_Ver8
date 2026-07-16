@@ -49,13 +49,20 @@ def _make_dpo_trainer_cls(base_trainer_cls, beta: float):
             rejected_ids = inputs.pop("rejected_ids")
             last_pos = inputs.pop("last_pos")
 
-            outputs = model(**inputs)
+            outputs = model(**inputs)   # 정책 forward — DDP를 통과해야 backward 시 grad 동기화됨
             b_idx = torch.arange(outputs.logits.shape[0], device=outputs.logits.device)
             logp = torch.log_softmax(outputs.logits[b_idx, last_pos].float(), dim=-1)
             pi_chosen, pi_rejected = logp[b_idx, chosen_ids], logp[b_idx, rejected_ids]
 
-            with torch.no_grad(), model.disable_adapter():
-                ref_out = model(**inputs)
+            # 참조 forward: disable_adapter는 PeftModel의 메서드라 DDP 래퍼엔 없다
+            # (멀티GPU에서 model은 DistributedDataParallel → model.disable_adapter()는
+            # AttributeError로 첫 스텝 크래시). accelerator.unwrap_model로 내부 PeftModel을
+            # 꺼내 호출한다(단일 프로세스면 unwrap이 그대로 반환 → 기존과 동일). no_grad라
+            # DDP를 안 거쳐도 결과 동일하고 grad 동기화도 불필요. TRL DPOTrainer와 같은 방식.
+            # (CPU 단위테스트는 base=object라 self.accelerator가 없음 → 그땐 model 그대로 사용)
+            ref_model = self.accelerator.unwrap_model(model) if hasattr(self, "accelerator") else model
+            with torch.no_grad(), ref_model.disable_adapter():
+                ref_out = ref_model(**inputs)
                 ref_logp = torch.log_softmax(ref_out.logits[b_idx, last_pos].float(), dim=-1)
                 ref_chosen, ref_rejected = ref_logp[b_idx, chosen_ids], ref_logp[b_idx, rejected_ids]
 
@@ -153,9 +160,9 @@ def _build_hard_negative_scorer(args):
 def load_model_and_adapter(args):
     """base(사전양자화 자동 감지) + 기존 SFT 어댑터를 is_trainable=True로 로드.
 
-    device_map은 PartialState().process_index로 고정 — torchrun/accelerate
-    멀티프로세스(DDP) 하에서 각 rank가 자기 GPU에만 올라가게 한다(단일 프로세스
-    실행 시엔 process_index==0이라 기존과 동일하게 동작, 하위호환).
+    device_map은 PartialState().local_process_index로 고정 — torchrun/accelerate
+    멀티프로세스(DDP) 하에서 각 rank가 자기 로컬 GPU에만 올라가게 한다. local_
+    (global 아님)이라 다중 노드에서도 올바르고, 단일 노드/단일 프로세스면 0이라 하위호환.
     """
     import torch
     from accelerate import PartialState
@@ -171,7 +178,7 @@ def load_model_and_adapter(args):
     if patch_prequant_vision_skip(auto_cfg):
         print("[quant] 사전양자화 skip_modules에 model.visual 보정(vision 비양자화 강제)")
 
-    device_map = {"": PartialState().process_index}
+    device_map = {"": PartialState().local_process_index}
     model = AutoModelForImageTextToText.from_pretrained(
         args.model_id, config=auto_cfg, device_map=device_map,
         attn_implementation=args.attn, dtype=torch.bfloat16)
@@ -215,8 +222,22 @@ def main(argv=None):
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
 
+    # DDP: 프로세스그룹을 넉넉한 timeout으로 **직접** 초기화한 뒤 PartialState/HF Trainer가
+    # 이걸 재사용하게 한다. 이유: --hard-negative 사전 스코어링(rank0 전용)이 도는 동안 다른
+    # rank는 state.wait_for_everyone() NCCL 배리어에서 대기하는데, NCCL 워치독 기본 타임아웃
+    # (~10분)이면 스코어링(수십 분)이 끝나기 전에 그 배리어가 타임아웃돼 죽는다. 2시간으로
+    # 늘려 스코어링을 견디게 한다. 단일 프로세스(torchrun 없이)면 이 블록은 스킵된다.
+    import os
+    if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        import torch
+        import torch.distributed as dist
+        from datetime import timedelta
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl", timeout=timedelta(hours=2))
+
     from accelerate import PartialState
-    state = PartialState()   # torchrun 환경변수가 있으면 여기서 프로세스그룹 초기화
+    state = PartialState()   # 위에서 만든 PG를 재사용(없으면 여기서 초기화)
 
     samples = load_csv(args.csv, args.image_dir, caption_col=args.caption_col)
     train_s, val_s = split_samples(samples, val_frac=args.val_frac)
@@ -282,12 +303,28 @@ def main(argv=None):
     import importlib.util
     _tb = any(importlib.util.find_spec(m) is not None for m in ("tensorboard", "tensorboardX"))
 
+    # DDP에서 --grad-accum은 **전역** 누적으로 해석해 world_size로 나눈다. HF Trainer+DDP는
+    # rank 간 grad를 평균하므로, per-device accum을 그대로 두면 유효배치가 world_size배로
+    # 커지고(=다른 레시피) 스텝당 forward 횟수도 그대로라 wall-clock이 안 빨라진다. 나눠주면
+    # 유효배치는 단일GPU와 동일하게 유지되고 스텝당 forward가 rank로 분산돼 실제로 ~world_size배
+    # 빨라진다(현 챔피언 ckpt200 레시피를 그대로 두고 속도만 얻는 게 목적). 2x 배치를 원하면
+    # --grad-accum을 2배로 주면 된다.
+    per_device_accum = max(1, args.grad_accum // state.num_processes)
+    if args.grad_accum % state.num_processes != 0:
+        print(f"[dpo][warn] --grad-accum({args.grad_accum})이 world_size({state.num_processes})로 "
+              f"나누어떨어지지 않음 → per-device {per_device_accum} 사용, 유효배치가 정확히 "
+              f"{args.grad_accum}이 아님({per_device_accum * state.num_processes})")
+    if state.is_main_process:
+        print(f"[dpo] 유효배치 = per_device 1 × accum {per_device_accum} × world_size "
+              f"{state.num_processes} = {per_device_accum * state.num_processes} "
+              f"(단일GPU accum {args.grad_accum}과 동일 목표)")
+
     from transformers import Trainer, TrainingArguments
     targs = TrainingArguments(
         output_dir=str(out),
         max_steps=args.max_steps,
         per_device_train_batch_size=1,          # 24GB/A100 규약 (score24 SFT와 동일)
-        gradient_accumulation_steps=args.grad_accum,
+        gradient_accumulation_steps=per_device_accum,
         learning_rate=args.lr,
         lr_scheduler_type="cosine", warmup_ratio=0.03,
         bf16=True,
