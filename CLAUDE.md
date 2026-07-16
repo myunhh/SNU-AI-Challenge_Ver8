@@ -46,3 +46,12 @@ torchrun --nproc_per_node=2 -m snuai.train.train_dpo --adapter runs/sft32b_v4/ad
   seed 고정 rng만 써서 rank 간 결정적으로 동일함을 이용). **`--include-random-rejected`는 이 DDP
   캐시 경로와 미지원**(rng 스트림이 rank마다 갈라질 위험) — 켜려면 단일 프로세스로 돌릴 것.
   `--ddp-find-unused-parameters`는 gradient-checkpointing+PEFT+DDP 조합에서 크래시 시에만 켤 것.
+- **⚠️ 2026-07-16 재검토로 발견·수정된 메모리 누수**: 스코어링 후 `del scorer_eng`만으로는 GPU
+  메모리가 안 풀렸다 — `scorer_fn`이 `Score24Scorer`(→ 그 안의 VLMEngine)를 클로저로 캡처하고 있어
+  refcount가 안 떨어졌기 때문. `del scorer_eng, scorer_fn`으로 같이 지워야 `empty_cache()`가 실제로
+  비운다(단일프로세스·DDP rank0 양쪽 다 수정). 특히 DDP에서 안 고쳤으면 rank0가 스코어링 엔진 메모리를
+  들고 있는 채로 그 위에 학습용 모델을 또 올려야 해서, VRAM이 빠듯하면 rank0 학습 모델 로딩 시점에
+  OOM 위험이 있었다.
+- **잔여 리스크(코드로 못 막음)**: rank0가 hard-negative 스코어링 도중 죽으면 다른 rank는
+  `state.wait_for_everyone()`에서 NCCL 기본 타임아웃까지 대기 — 오래 멈춘 것 같으면 rank0 로그부터
+  확인할 것. 본런 전에 반드시 스모크(몇 스텝)로 DDP 경로가 실제로 도는지 먼저 확인 권장.

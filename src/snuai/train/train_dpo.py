@@ -233,7 +233,10 @@ def main(argv=None):
         print("[dpo] hard-negative 스코어링 시작 (--adapter 기준 3종 중 최고점 오답 선택)")
         scorer_fn, scorer_eng = _build_hard_negative_scorer(args)
         records = build_dpo_records(train_s, pair_cfg, scorer=scorer_fn)
-        del scorer_eng
+        # scorer_fn이 Score24Scorer(→ scorer_eng의 VLMEngine)를 클로저로 캡처하고 있어
+        # scorer_eng만 del하면 refcount가 안 떨어져 empty_cache가 무효했다(2026-07-16
+        # 재검토로 발견) — scorer_fn도 같이 지워야 실제로 GPU 메모리가 풀린다.
+        del scorer_eng, scorer_fn
         import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -254,7 +257,10 @@ def main(argv=None):
             for r in records:
                 cache.setdefault(r["sample_id"], []).append(r["rejected_rank"])
             cache_path.write_text(json.dumps(cache))
-            del scorer_eng
+            # scorer_fn이 scorer_eng를 클로저로 캡처하고 있어 scorer_eng만 del하면
+            # refcount가 안 떨어져 empty_cache가 무효하다 — scorer_fn도 같이 지워야
+            # rank1(들)의 학습용 모델 로딩 전에 이 GPU 메모리가 실제로 풀린다.
+            del scorer_eng, scorer_fn
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
