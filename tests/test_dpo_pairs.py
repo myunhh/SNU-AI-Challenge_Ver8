@@ -82,6 +82,41 @@ def test_include_random_rejected_adds_extra_distinct_record():
     assert rank not in ranks
 
 
+def test_rejected_ranks_cache_reproduces_scorer_records():
+    """DDP 재구성 경로: rank0가 scorer로 만든 records → JSON 캐시 → 다른 rank가
+    캐시만으로 동일 records를 재구성(json round-trip으로 tuple→list 되어도 무방,
+    perm._check가 다시 tuple화)."""
+    import json
+
+    rank = (2, 0, 3, 1)
+    candidates = perm.adjacent_swap_ranks(rank)
+
+    def fake_scorer(caption, images):
+        scores = np.zeros(24)
+        for i, c in enumerate(candidates):
+            scores[perm.index_of(c)] = float(i)
+        scores[perm.index_of(rank)] = 100.0
+        return scores
+
+    cfg = DPOPairConfig(rejected_per_sample=2, augment=_NO_SHUFFLE)
+    samples = [_sample(rank)]
+    recs_rank0 = build_dpo_records(samples, cfg, scorer=fake_scorer)
+
+    cache: dict[str, list] = {}
+    for r in recs_rank0:
+        cache.setdefault(r["sample_id"], []).append(r["rejected_rank"])
+    cache_roundtrip = json.loads(json.dumps(cache))   # tuple -> list (JSON엔 튜플이 없음)
+
+    recs_other_rank = build_dpo_records(samples, cfg, rejected_ranks_cache=cache_roundtrip)
+
+    assert len(recs_other_rank) == len(recs_rank0)
+    for a, b in zip(recs_rank0, recs_other_rank):
+        assert a["chosen"] == b["chosen"]
+        assert a["rejected"] == b["rejected"]
+        assert a["chosen_rank"] == b["chosen_rank"]
+        assert tuple(a["rejected_rank"]) == tuple(b["rejected_rank"])
+
+
 def test_unlabeled_sample_raises():
     images = [Image.new("RGB", (8, 8)) for _ in range(4)]
     unlabeled = Sample(id="s2", caption="c", images=images, rank=None)

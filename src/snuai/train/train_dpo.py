@@ -151,8 +151,14 @@ def _build_hard_negative_scorer(args):
 
 
 def load_model_and_adapter(args):
-    """base(사전양자화 자동 감지) + 기존 SFT 어댑터를 is_trainable=True로 로드."""
+    """base(사전양자화 자동 감지) + 기존 SFT 어댑터를 is_trainable=True로 로드.
+
+    device_map은 PartialState().process_index로 고정 — torchrun/accelerate
+    멀티프로세스(DDP) 하에서 각 rank가 자기 GPU에만 올라가게 한다(단일 프로세스
+    실행 시엔 process_index==0이라 기존과 동일하게 동작, 하위호환).
+    """
     import torch
+    from accelerate import PartialState
     from peft import PeftModel
     from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor
 
@@ -165,8 +171,9 @@ def load_model_and_adapter(args):
     if patch_prequant_vision_skip(auto_cfg):
         print("[quant] 사전양자화 skip_modules에 model.visual 보정(vision 비양자화 강제)")
 
+    device_map = {"": PartialState().process_index}
     model = AutoModelForImageTextToText.from_pretrained(
-        args.model_id, config=auto_cfg, device_map={"": 0},
+        args.model_id, config=auto_cfg, device_map=device_map,
         attn_implementation=args.attn, dtype=torch.bfloat16)
     print("[verify]", verify_vision_not_quantized(model))
 
@@ -201,9 +208,15 @@ def main(argv=None):
     d("--save-steps", type=int, default=200); d("--logging-steps", type=int, default=10)
     d("--resume", action="store_true")
     d("--seed", type=int, default=777)
+    d("--ddp-find-unused-parameters", action="store_true", default=False,
+      help="DDP(멀티GPU)에서 'mark variable ready only once' 크래시 시 켜볼 것 "
+           "(gradient checkpointing+PEFT 조합에서 간헐적으로 필요)")
     args = ap.parse_args(argv)
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
+
+    from accelerate import PartialState
+    state = PartialState()   # torchrun 환경변수가 있으면 여기서 프로세스그룹 초기화
 
     samples = load_csv(args.csv, args.image_dir, caption_col=args.caption_col)
     train_s, val_s = split_samples(samples, val_frac=args.val_frac)
@@ -213,21 +226,46 @@ def main(argv=None):
                              include_random_rejected=args.include_random_rejected,
                              seed=args.seed)
 
-    scorer_fn, scorer_eng = (None, None)
-    if args.hard_negative:
+    cache_path = out / "hard_negative_cache.json"
+    if not args.hard_negative:
+        records = build_dpo_records(train_s, pair_cfg, scorer=None)
+    elif state.num_processes == 1:
         print("[dpo] hard-negative 스코어링 시작 (--adapter 기준 3종 중 최고점 오답 선택)")
         scorer_fn, scorer_eng = _build_hard_negative_scorer(args)
-
-    records = build_dpo_records(train_s, pair_cfg, scorer=scorer_fn)
-    print(f"[dpo] 선호쌍 {len(records)}개 (샘플 {len(train_s)} × rejected_per_sample "
-          f"{args.rejected_per_sample}{'+random' if args.include_random_rejected else ''})")
-
-    if scorer_eng is not None:
-        import torch
+        records = build_dpo_records(train_s, pair_cfg, scorer=scorer_fn)
         del scorer_eng
+        import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         print("[dpo] 스코어링용 엔진 해제 — 학습용 모델 로딩 시작")
+    else:
+        # DDP: rank0만 스코어링(비싼 forward pass, 80분+)해서 sample_id별 정렬된
+        # 인접스와프 순위를 캐시로 남기고, 다른 rank는 그 캐시로 동일 records를
+        # 재구성한다(augment_sample이 seed 고정 rng뿐이라 rank 간 결정적으로 동일).
+        if args.include_random_rejected:
+            raise SystemExit("--include-random-rejected는 DDP(멀티프로세스) hard-negative "
+                             "캐시 경로에서 rng 스트림이 rank 간 어긋날 수 있어 미지원 — "
+                             "단일 프로세스(torchrun 없이)로 돌리거나 이 옵션을 빼고 실행할 것")
+        if state.is_main_process:
+            print(f"[dpo] hard-negative 스코어링 시작 (rank0 전용, world_size={state.num_processes})")
+            scorer_fn, scorer_eng = _build_hard_negative_scorer(args)
+            records = build_dpo_records(train_s, pair_cfg, scorer=scorer_fn)
+            cache: dict[str, list[int]] = {}
+            for r in records:
+                cache.setdefault(r["sample_id"], []).append(r["rejected_rank"])
+            cache_path.write_text(json.dumps(cache))
+            del scorer_eng
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print(f"[dpo] 스코어링용 엔진 해제, 캐시 {len(cache)}건 저장 → {cache_path}")
+        state.wait_for_everyone()   # rank0의 GPU 해제까지 다른 rank가 대기
+        if not state.is_main_process:
+            cache = {sid: ranks for sid, ranks in json.loads(cache_path.read_text()).items()}
+            records = build_dpo_records(train_s, pair_cfg, rejected_ranks_cache=cache)
+
+    print(f"[dpo] 선호쌍 {len(records)}개 (샘플 {len(train_s)} × rejected_per_sample "
+          f"{args.rejected_per_sample}{'+random' if args.include_random_rejected else ''})")
 
     model, processor = load_model_and_adapter(args)
     apply_pixel_budget(processor, max_pixels=args.max_pixels)
@@ -254,6 +292,7 @@ def main(argv=None):
         remove_unused_columns=False,
         dataloader_num_workers=2,
         report_to=("tensorboard" if _tb else "none"), logging_dir=str(out / "tb"),
+        ddp_find_unused_parameters=args.ddp_find_unused_parameters,
     )
     trainer_cls = _make_dpo_trainer_cls(Trainer, beta=args.beta)
     trainer = trainer_cls(model=model, args=targs, train_dataset=records, data_collator=collator)

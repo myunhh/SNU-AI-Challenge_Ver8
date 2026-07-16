@@ -28,7 +28,8 @@ class DPOPairConfig:
 
 
 def build_dpo_records(samples: list[Sample], cfg: DPOPairConfig,
-                      scorer: Callable[[str, list], "object"] | None = None) -> list[dict]:
+                      scorer: Callable[[str, list], "object"] | None = None,
+                      rejected_ranks_cache: dict[str, list] | None = None) -> list[dict]:
     """레코드: {"prompt_messages", "chosen", "rejected", ...}.
 
     chosen/rejected는 단일 글자(LETTERS24) — score24 SFT와 같은 출력 공간이라
@@ -38,6 +39,15 @@ def build_dpo_records(samples: list[Sample], cfg: DPOPairConfig,
     스와프 3종 중 **현재 모델이 가장 그럴듯하다고 보는 오답**(hard negative, TODO
     §2a 1순위)을 rejected로 고른다. None이면(기본) 3종 중 무작위 선택 — SFT 어댑터
     없이도 파이프라인을 검증할 수 있게 하는 폴백이며 실제 DPO 학습은 scorer를 준다.
+
+    rejected_ranks_cache가 주어지면 scorer 호출 없이 sample_id별로 미리 계산된
+    **최종** rejected_ranks(정렬+슬라이스+include_random_rejected까지 전부 반영된
+    결과)를 그대로 쓴다(DDP에서 rank0가 한 번만 scorer를 돌리고 다른 rank들이
+    재사용하는 용도 — augment_sample은 seed 고정 rng만 쓰므로 rank 간
+    aug.rank/caption/images는 결정적으로 동일하다). include_random_rejected는
+    캐시 경로에서 rng를 추가 소비하지 않으므로(캐시가 이미 그 결과를 담고 있음)
+    호출자가 rank0/재구성 양쪽에 동일 cfg를 써야 한다 — 호출자(train_dpo.py)가
+    캐시+include_random_rejected 동시 사용을 막는다(rng 스트림 분기 위험).
     """
     rng = random.Random(cfg.seed)
     out: list[dict] = []
@@ -48,19 +58,22 @@ def build_dpo_records(samples: list[Sample], cfg: DPOPairConfig,
         msgs = build_score24_messages(aug.caption, aug.images, video_mode=cfg.video_mode)
         chosen = perm.letter_of_rank(aug.rank)
 
-        candidates = perm.adjacent_swap_ranks(aug.rank)
-        if scorer is not None:
-            scores24 = scorer(aug.caption, aug.images)
-            candidates = sorted(candidates, key=lambda r: scores24[perm.index_of(r)], reverse=True)
+        if rejected_ranks_cache is not None:
+            rejected_ranks = list(rejected_ranks_cache[s.id])
         else:
-            rng.shuffle(candidates)
-        rejected_ranks = candidates[: cfg.rejected_per_sample]
-        if cfg.include_random_rejected:
-            while True:
-                r = perm.random_shuffle(rng)
-                if r != aug.rank and r not in rejected_ranks:
-                    rejected_ranks.append(r)
-                    break
+            candidates = perm.adjacent_swap_ranks(aug.rank)
+            if scorer is not None:
+                scores24 = scorer(aug.caption, aug.images)
+                candidates = sorted(candidates, key=lambda r: scores24[perm.index_of(r)], reverse=True)
+            else:
+                rng.shuffle(candidates)
+            rejected_ranks = candidates[: cfg.rejected_per_sample]
+            if cfg.include_random_rejected:
+                while True:
+                    r = perm.random_shuffle(rng)
+                    if r != aug.rank and r not in rejected_ranks:
+                        rejected_ranks.append(r)
+                        break
         for rj in rejected_ranks:
             out.append({
                 "sample_id": s.id,
