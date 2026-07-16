@@ -259,7 +259,18 @@ def main(argv=None):
                    if args.soft_label_temperature is not None else Trainer)
     trainer = trainer_cls(model=model, args=targs, train_dataset=train_ds,
                           data_collator=collator)
-    trainer.train(resume_from_checkpoint=args.resume or None)
+    # VESSL 재개 설계: --resume는 항상 붙여도 안전해야 한다(첫 런엔 체크포인트가 없음).
+    # resume_from_checkpoint=True를 그대로 넘기면 첫 런에서 "No valid checkpoint" 에러가
+    # 나므로, out에 실제 체크포인트가 있을 때만 그 경로를 재개 대상으로 넘긴다.
+    resume_ckpt = None
+    if args.resume:
+        from transformers.trainer_utils import get_last_checkpoint
+        resume_ckpt = get_last_checkpoint(str(out))
+        if resume_ckpt is None:
+            print(f"[resume] {out}에 체크포인트 없음 → 처음부터 학습")
+        else:
+            print(f"[resume] {resume_ckpt}에서 재개")
+    trainer.train(resume_from_checkpoint=resume_ckpt)
     import torch
     if torch.cuda.is_available():
         # bf16/4bit VRAM 비교 실측용 (TODO §5 스모크)
