@@ -206,6 +206,9 @@ def main(argv=None):
     d("--legend", action=argparse.BooleanOptionalAction, default=True)
     d("--rejected-per-sample", type=int, default=1)
     d("--include-random-rejected", action="store_true")
+    d("--reversal-rejected", action=argparse.BooleanOptionalAction, default=False,
+      help="완전역전(d=6) rejected 쌍 추가 — '확신에 찬 방향 역전' 오류 억제용 "
+           "(2026-07-18 ckpt600 홀드아웃 분석). 결정적 생성이라 DDP 캐시 경로와도 호환")
     d("--hard-negative", action=argparse.BooleanOptionalAction, default=True,
       help="on(기본): --adapter로 3종 스코어링 후 최고점 오답 채택. off: 무작위 선택")
     d("--beta", type=float, default=0.1, help="DPO 온도(참조 대비 로그오즈 스케일)")
@@ -245,6 +248,7 @@ def main(argv=None):
 
     pair_cfg = DPOPairConfig(rejected_per_sample=args.rejected_per_sample,
                              include_random_rejected=args.include_random_rejected,
+                             include_reversal_rejected=args.reversal_rejected,
                              seed=args.seed)
 
     cache_path = out / "hard_negative_cache.json"
@@ -292,7 +296,8 @@ def main(argv=None):
             records = build_dpo_records(train_s, pair_cfg, rejected_ranks_cache=cache)
 
     print(f"[dpo] 선호쌍 {len(records)}개 (샘플 {len(train_s)} × rejected_per_sample "
-          f"{args.rejected_per_sample}{'+random' if args.include_random_rejected else ''})")
+          f"{args.rejected_per_sample}{'+random' if args.include_random_rejected else ''}"
+          f"{'+reversal' if args.reversal_rejected else ''})")
 
     model, processor = load_model_and_adapter(args)
     apply_pixel_budget(processor, max_pixels=args.max_pixels)

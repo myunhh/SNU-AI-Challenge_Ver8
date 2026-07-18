@@ -117,6 +117,37 @@ def test_rejected_ranks_cache_reproduces_scorer_records():
         assert tuple(a["rejected_rank"]) == tuple(b["rejected_rank"])
 
 
+def test_reversal_rejected_adds_d6_record():
+    rank = (2, 0, 3, 1)
+    recs = build_dpo_records(
+        [_sample(rank)],
+        DPOPairConfig(rejected_per_sample=1, include_reversal_rejected=True, augment=_NO_SHUFFLE))
+    assert len(recs) == 2
+    dists = sorted(perm.kendall_tau_distance(perm.rank_of_letter(r["rejected"]), rank)
+                   for r in recs)
+    assert dists == [1, 6]   # 인접 스와프 1개 + 완전역전 1개
+    rev = recs[-1]["rejected_rank"]
+    assert tuple(rev) == tuple(perm.N - 1 - r for r in rank)
+
+
+def test_reversal_rejected_cache_roundtrip():
+    """역전 rejected는 결정적 생성이라 DDP 캐시 왕복 후에도 동일 records 재구성."""
+    import json
+
+    rank = (2, 0, 3, 1)
+    cfg = DPOPairConfig(rejected_per_sample=1, include_reversal_rejected=True, augment=_NO_SHUFFLE)
+    samples = [_sample(rank)]
+    recs_rank0 = build_dpo_records(samples, cfg)
+
+    cache: dict[str, list] = {}
+    for r in recs_rank0:
+        cache.setdefault(r["sample_id"], []).append(r["rejected_rank"])
+    cache_roundtrip = json.loads(json.dumps(cache))
+
+    recs_other = build_dpo_records(samples, cfg, rejected_ranks_cache=cache_roundtrip)
+    assert [r["rejected"] for r in recs_other] == [r["rejected"] for r in recs_rank0]
+
+
 def test_unlabeled_sample_raises():
     images = [Image.new("RGB", (8, 8)) for _ in range(4)]
     unlabeled = Sample(id="s2", caption="c", images=images, rank=None)

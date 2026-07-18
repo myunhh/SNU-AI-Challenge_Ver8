@@ -22,6 +22,11 @@ from ..prompting import build_score24_messages
 class DPOPairConfig:
     rejected_per_sample: int = 1      # 인접 스와프 3종 중 몇 개를 쌍으로 만들지
     include_random_rejected: bool = False  # 스와프 외 랜덤 오답도 추가할지
+    # 완전역전(d=6) rejected 추가 — ckpt600 홀드아웃 오답 분석(2026-07-18)에서 확인된
+    # "확신에 찬 방향 역전"(d>=4 64건, 완전역전 12건, margin 0.98+)을 직접 벌주는 신호.
+    # 인접 스와프(d=1)만으로는 이 오류 모드에 그래디언트가 실리지 않는다.
+    # 결정적 생성(rng 미소비)이라 include_random_rejected와 달리 DDP 캐시 경로와 호환.
+    include_reversal_rejected: bool = False
     augment: AugmentConfig = field(default_factory=lambda: AugmentConfig(perm_mode="uniform"))
     video_mode: bool = False
     seed: int = 777
@@ -68,6 +73,10 @@ def build_dpo_records(samples: list[Sample], cfg: DPOPairConfig,
             else:
                 rng.shuffle(candidates)
             rejected_ranks = candidates[: cfg.rejected_per_sample]
+            if cfg.include_reversal_rejected:
+                # 랭크 공간 완전역전: r -> (N-1)-r. 항상 d=6이라 chosen/스와프와 충돌 불가.
+                # random rejected보다 먼저 넣어 아래 dedup 루프가 역전과의 중복도 걸러준다.
+                rejected_ranks.append(tuple(perm.N - 1 - r for r in aug.rank))
             if cfg.include_random_rejected:
                 while True:
                     r = perm.random_shuffle(rng)

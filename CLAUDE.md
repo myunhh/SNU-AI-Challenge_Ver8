@@ -2,12 +2,14 @@
 
 셔플된 비디오 프레임 4장 + 캡션 → 시간순 재배열(4!=24). SNU AI Challenge 2026.
 
-**이 저장소 = Ver7을 베이스로 시작한 학습 단 개선 트랙 — 현재 대회 챔피언(LB 0.90401).**
+**이 저장소 = Ver7을 베이스로 시작한 학습 단 개선 트랙 — 현재 대회 챔피언(LB 0.91099).**
 추론 단 개선(재질의·디코딩·TTA 확장·서빙 정밀도)이 Ver1~7에서 전부 실측 소진된 뒤, 남은 합법
 레버인 학습 단(가중치를 바꾸는 것)에 집중. **DPO(인접 스와프 hard-negative)**를 Ver4 ckpt1600
-base 위에 A100에서 실행해 checkpoint-200이 LB **0.90401**(Ver4 ckpt1600의 0.90226 대비
-+0.175pp) — 홀드아웃 게이트 없이 LB로 직접 판정된 결과라 재현성·과적합 검증 미완. 상세 경위·
-게이트 판정 이력은 `../PROJECT_SUMMARY.md` §2 Ver8 항목, 공통 규정·함정은 `../CLAUDE.md` 참고.
+base 위에 A100에서 실행해 checkpoint-200이 LB 0.90401(Ver4 ckpt1600의 0.90226 대비 +0.175pp)
+찍고, 2026-07-18 스텝 스윕 홀드아웃 945건 페어드 비교(맥니마)에서 **checkpoint-600**만 유의
+(EM 0.6063 vs 0.5958, p=0.041)해 LB 검증 → **0.91099로 승격, 현 챔피언**. ckpt400/800/1000은
+비유의(각 0.5979/0.6032/0.6032). 상세 경위·게이트 판정 이력은 `../PROJECT_SUMMARY.md` §2 Ver8
+항목, 공통 규정·함정은 `../CLAUDE.md` 참고.
 
 ## 진입점
 
@@ -32,7 +34,9 @@ torchrun --nproc_per_node=2 -m snuai.train.train_dpo --adapter runs/sft32b_v4/ad
 ## 저장소 구조
 
 - `src/snuai/train/train_dpo.py` — 단일토큰 DPO(TRL 미사용, 참조모델은 `disable_adapter()`로 대체)
-- `src/snuai/train/dpo_pairs.py` — 인접 스와프 hard-negative 선호쌍 생성
+- `src/snuai/train/dpo_pairs.py` — 인접 스와프 hard-negative 선호쌍 생성. `--reversal-rejected`
+  (2026-07-18)로 완전역전(d=6) rejected 추가 가능 — ckpt600 홀드아웃 오답 분석에서 확인된
+  "확신에 찬 방향 역전"(d≥4 64건/완전역전 12건) 억제용. 결정적 생성이라 DDP 캐시 경로 호환.
 - `scripts/diag_swap_submission.py` — 고마진 K건 인접 스와프로 EM/쌍순서 채점방식 가설 구분용 진단 제출 생성기(실제 Kaggle 제출은 미실행)
 
 ## 다음 액션
