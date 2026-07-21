@@ -56,7 +56,12 @@ def build_dpo_records(samples: list[Sample], cfg: DPOPairConfig,
     """
     rng = random.Random(cfg.seed)
     out: list[dict] = []
-    for s in samples:
+    iterable = samples
+    if scorer is not None:
+        # hard-negative 스코어링은 샘플당 forward 1회로 수십 분 걸린다 — 진행바 필수(전역 규약)
+        from tqdm import tqdm
+        iterable = tqdm(samples, desc="hard-negative 스코어링", unit="샘플", mininterval=5.0)
+    for s in iterable:
         if s.rank is None:
             raise ValueError(f"라벨 없는 샘플: {s.id}")
         aug = augment_sample(s, cfg.augment, rng)

@@ -23,8 +23,20 @@ class TTAConfig:
     agg: str = "mean"             # "mean"(로그확률 평균) | "majority"(다수결)
 
 
+# Klein 4원군 (Ver11에서 이식, 2026-07-20) — sharply transitive 세트: 4뷰에 걸쳐
+# 각 입력이 각 슬롯을 정확히 1회씩 방문(위치에 대한 라틴방진)해 슬롯-위치 편향이
+# 기대값이 아니라 정확히 상쇄된다. 항등 외 원소는 모두 고정점 없는 대합.
+BALANCED4: tuple[perm.Perm, ...] = ((0, 1, 2, 3), (1, 0, 3, 2), (2, 3, 0, 1), (3, 2, 1, 0))
+
+
 def tta_shuffles(cfg: TTAConfig) -> list[perm.Perm]:
-    """항등 + (n_views-1)개의 서로 다른 랜덤 셔플. 결정적."""
+    """항등 + (n_views-1)개의 서로 다른 랜덤 셔플. 결정적.
+
+    예외: n_views==4 는 균형 Klein 세트(위 BALANCED4)를 반환 — Ver11과 동일 규약.
+    다른 n은 기존 시드셔플 경로와 바이트 동일(TTA3 재현성 보존).
+    """
+    if cfg.n_views == 4:
+        return list(BALANCED4)
     views: list[perm.Perm] = [perm.IDENTITY]
     rng = random.Random(cfg.seed)
     while len(views) < min(cfg.n_views, 24):

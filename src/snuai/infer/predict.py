@@ -28,6 +28,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
+from tqdm import tqdm
 
 from .. import perm, submission
 from ..budget import BudgetGuard
@@ -115,7 +116,9 @@ def run_predict(samples: list[Sample], scorer, cfg: PredictConfig,
     view_cost_est = None  # 뷰 1회 비용 롤링 추정
 
     with open(progress_path, "a", encoding="utf-8") as prog:
-        for s in samples:
+        # done 포함 전체를 순회하므로 initial=0 (재개된 샘플은 continue로 빠르게 지나감)
+        for s in tqdm(samples, desc="predict", unit="샘플",
+                      total=len(samples), mininterval=5.0):
             if s.id in done:
                 continue
             budget.start_sample()

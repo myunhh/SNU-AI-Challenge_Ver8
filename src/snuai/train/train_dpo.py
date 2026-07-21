@@ -172,10 +172,7 @@ def load_model_and_adapter(args):
     processor = AutoProcessor.from_pretrained(args.model_id)
     auto_cfg = AutoConfig.from_pretrained(args.model_id)
     prequantized = getattr(auto_cfg, "quantization_config", None) is not None
-    if not prequantized:
-        raise SystemExit("train_dpo.py는 사전양자화(bnb-4bit) 체크포인트 전용 — "
-                         "비양자화 8B 회귀 실험은 --precision bf16 지원이 필요하면 추가할 것")
-    if patch_prequant_vision_skip(auto_cfg):
+    if prequantized and patch_prequant_vision_skip(auto_cfg):
         print("[quant] 사전양자화 skip_modules에 model.visual 보정(vision 비양자화 강제)")
 
     device_map = {"": PartialState().local_process_index}
@@ -185,10 +182,17 @@ def load_model_and_adapter(args):
     print("[verify]", verify_vision_not_quantized(model))
 
     model.config.use_cache = False
-    from peft import prepare_model_for_kbit_training
-    model = prepare_model_for_kbit_training(
-        model, use_gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False})
+    if prequantized:
+        from peft import prepare_model_for_kbit_training
+        model = prepare_model_for_kbit_training(
+            model, use_gradient_checkpointing=True,
+            gradient_checkpointing_kwargs={"use_reentrant": False})
+    else:
+        # 비양자화(bf16 풀정밀 LoRA) 경로 — train_sft.py의 --precision bf16과 동일 규약:
+        # kbit 준비 대신 체크포인팅+입력 grad만 활성화 (8B bf16 트랙, 2026-07-19)
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False})
+        model.enable_input_require_grads()
     model = PeftModel.from_pretrained(model, args.adapter, is_trainable=True)
     print("[verify]", verify_lora_only_on_language(model))
     model.print_trainable_parameters()
@@ -344,7 +348,17 @@ def main(argv=None):
     )
     trainer_cls = _make_dpo_trainer_cls(Trainer, beta=args.beta)
     trainer = trainer_cls(model=model, args=targs, train_dataset=records, data_collator=collator)
-    trainer.train(resume_from_checkpoint=args.resume or None)
+    # --resume는 첫 런(체크포인트 없음)에서도 안전해야 한다 — train_sft.py와 동일 규약:
+    # True를 그대로 넘기면 "No valid checkpoint" 에러가 나므로 실제 경로가 있을 때만 재개.
+    resume_ckpt = None
+    if args.resume:
+        from transformers.trainer_utils import get_last_checkpoint
+        resume_ckpt = get_last_checkpoint(str(out))
+        if resume_ckpt is None:
+            print(f"[resume] {out}에 체크포인트 없음 → 처음부터 학습")
+        else:
+            print(f"[resume] {resume_ckpt}에서 재개")
+    trainer.train(resume_from_checkpoint=resume_ckpt)
 
     import torch
     if torch.cuda.is_available():
