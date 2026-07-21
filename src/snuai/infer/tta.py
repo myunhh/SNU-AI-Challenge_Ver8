@@ -21,6 +21,7 @@ class TTAConfig:
     n_views: int = 1              # 1이면 TTA 없음(원본 1회)
     seed: int = 1234              # 뷰 셔플 추출 시드(전 샘플 공통 → 재현 가능)
     agg: str = "mean"             # "mean"(로그확률 평균) | "majority"(다수결)
+    balanced8: bool = False       # n_views==8 을 균형 2-코셋 세트로 대체(아래 BALANCED8)
 
 
 # Klein 4원군 (Ver11에서 이식, 2026-07-20) — sharply transitive 세트: 4뷰에 걸쳐
@@ -28,13 +29,30 @@ class TTAConfig:
 # 기대값이 아니라 정확히 상쇄된다. 항등 외 원소는 모두 고정점 없는 대합.
 BALANCED4: tuple[perm.Perm, ...] = ((0, 1, 2, 3), (1, 0, 3, 2), (2, 3, 0, 1), (3, 2, 1, 0))
 
+# 균형 8뷰 (2026-07-21) — Klein V 에 V의 코셋 하나를 더한 8뷰: 각 입력이 각 슬롯을
+# 정확히 2회씩 방문해 TTA4의 정확 상쇄 성질을 유지한 채 뷰 분산만 절반으로 줄인다
+# (TTA5~8의 "항등+랜덤" 세트는 이 성질이 없음 — tta_report_2026-07-20.md §1).
+# 두 번째 블록은 역원에 닫혀 있어(4-cycle 쌍 + 대합 2개) 셔플 방향 규약과 무관하게
+# 균형이 성립한다. 참고: 어떤 균형 8뷰 세트든 고정점 총합은 정확히 8로 동일 —
+# 이 선택이 고정점 면에서 손해보지 않는다.
+BALANCED8: tuple[perm.Perm, ...] = BALANCED4 + (
+    (1, 2, 3, 0), (0, 3, 2, 1), (3, 0, 1, 2), (2, 1, 0, 3))
+
 
 def tta_shuffles(cfg: TTAConfig) -> list[perm.Perm]:
     """항등 + (n_views-1)개의 서로 다른 랜덤 셔플. 결정적.
 
     예외: n_views==4 는 균형 Klein 세트(위 BALANCED4)를 반환 — Ver11과 동일 규약.
+    예외: balanced8=True 는 n_views==8에서 BALANCED8 반환(예산 축소로 n_views==1이
+      되면 항등만 — 기존 축소 경로와 동일 동작). 그 외 n_views와의 조합은 에러.
     다른 n은 기존 시드셔플 경로와 바이트 동일(TTA3 재현성 보존).
     """
+    if cfg.balanced8:
+        if cfg.n_views == 8:
+            return list(BALANCED8)
+        if cfg.n_views == 1:  # BudgetGuard 뷰 축소 경로
+            return [perm.IDENTITY]
+        raise ValueError(f"balanced8은 n_views 8(또는 축소된 1)에서만 유효: {cfg.n_views}")
     if cfg.n_views == 4:
         return list(BALANCED4)
     views: list[perm.Perm] = [perm.IDENTITY]

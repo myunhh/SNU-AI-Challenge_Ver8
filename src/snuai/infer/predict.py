@@ -82,6 +82,7 @@ class PredictConfig:
     tta_views: int = 1
     tta_seed: int = 1234
     tta_agg: str = "mean"
+    tta_balanced8: bool = False     # --tta 8 을 균형 2-코셋 세트로 (tta.BALANCED8)
     cascade: CascadeConfig = CascadeConfig(enable=False)
     budget_hours: float = 24.0
     safety: float = 0.85
@@ -138,7 +139,8 @@ def run_predict(samples: list[Sample], scorer, cfg: PredictConfig,
                 t_v0 = clock()
                 scores, _ = tta_scores(images, scorer_fn,
                                        TTAConfig(n_views=n_views, seed=cfg.tta_seed,
-                                                 agg=cfg.tta_agg))
+                                                 agg=cfg.tta_agg,
+                                                 balanced8=cfg.tta_balanced8))
                 dt_views = clock() - t_v0
                 cost = dt_views / max(n_views, 1)
                 view_cost_est = cost if view_cost_est is None else 0.8 * view_cost_est + 0.2 * cost
@@ -305,6 +307,8 @@ def main(argv=None):
     d("--cot-samples", type=int, default=1, help="Self-Consistency 샘플 수")
     # Ver3 기본 1(TTA 없음) — 홀드아웃에서 이득이 실증될 때만 게이트 통과 후 상향
     d("--tta", type=int, default=1, dest="tta_views")
+    d("--tta-balanced8", action="store_true", dest="tta_balanced8",
+      help="--tta 8 전용: 항등+7랜덤 대신 균형 2-코셋 8뷰(각 입력이 각 슬롯 정확히 2회)")
     d("--cascade", action="store_true"); d("--tau", type=float, default=0.15)
     d("--lam", type=float, default=1.0)
     d("--budget-hours", type=float, default=24.0)
@@ -324,8 +328,11 @@ def main(argv=None):
 
     samples = load_samples(args)
     scorer, pairwise_factory = build_scorer(args)
+    if args.tta_balanced8 and args.tta_views != 8:
+        raise SystemExit("--tta-balanced8은 --tta 8과만 조합 가능")
     cfg = PredictConfig(
         strategy=args.strategy, tta_views=args.tta_views,
+        tta_balanced8=args.tta_balanced8,
         cascade=CascadeConfig(enable=args.cascade, tau=args.tau, lam=args.lam),
         budget_hours=args.budget_hours, out_dir=args.out)
     report = run_predict(samples, scorer, cfg, pairwise_factory=pairwise_factory)
