@@ -88,8 +88,9 @@ def main() -> None:
             if s.id in done:
                 continue
             rec: dict = {"id": s.id, "true_rank": list(s.rank)}
+            images = s.load_images()
             for cond, cap in [("normal", s.caption), ("empty", ""), ("swapped", swapped_captions[i])]:
-                scores = scorer.scores(cap, s.images)
+                scores = scorer.scores(cap, images)
                 pred_idx = int(scores.argmax())
                 pred_rank = perm.perm_at(pred_idx)
                 rec[cond] = {"pred": list(pred_rank), "correct": pred_rank == s.rank}
