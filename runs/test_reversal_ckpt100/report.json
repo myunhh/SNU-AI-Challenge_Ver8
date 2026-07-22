@@ -1,0 +1,14 @@
+{
+  "n": 819,
+  "errors": 0,
+  "escalated": 0,
+  "budget": {
+    "n": 819,
+    "mean_sec": 3.0521003631317716,
+    "p50_sec": 2.384761556982994,
+    "p95_sec": 5.034960277378559,
+    "max_sec": 5.259277023375034,
+    "projected_total_h": 0.694352832612478
+  },
+  "submission": "runs/test_reversal_ckpt100/submission.csv"
+}
