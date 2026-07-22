@@ -309,6 +309,8 @@ def main(argv=None):
     d("--tta", type=int, default=1, dest="tta_views")
     d("--tta-balanced8", action="store_true", dest="tta_balanced8",
       help="--tta 8 전용: 항등+7랜덤 대신 균형 2-코셋 8뷰(각 입력이 각 슬롯 정확히 2회)")
+    d("--agg", default="mean", choices=["mean", "majority"], dest="tta_agg",
+      help="TTA 뷰 집계 방식 — mean(로그확률 평균, 기본) | majority(다수결, 동률은 로그확률 평균)")
     d("--cascade", action="store_true"); d("--tau", type=float, default=0.15)
     d("--lam", type=float, default=1.0)
     d("--budget-hours", type=float, default=24.0)
@@ -332,7 +334,7 @@ def main(argv=None):
         raise SystemExit("--tta-balanced8은 --tta 8과만 조합 가능")
     cfg = PredictConfig(
         strategy=args.strategy, tta_views=args.tta_views,
-        tta_balanced8=args.tta_balanced8,
+        tta_balanced8=args.tta_balanced8, tta_agg=args.tta_agg,
         cascade=CascadeConfig(enable=args.cascade, tau=args.tau, lam=args.lam),
         budget_hours=args.budget_hours, out_dir=args.out)
     report = run_predict(samples, scorer, cfg, pairwise_factory=pairwise_factory)
