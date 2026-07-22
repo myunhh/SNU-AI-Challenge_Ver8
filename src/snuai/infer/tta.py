@@ -53,18 +53,40 @@ BALANCED8: tuple[perm.Perm, ...] = BALANCED4 + (
 BALANCED24: tuple[perm.Perm, ...] = tuple(perm.PERMS24)
 
 
+def _is_even_permutation(p: perm.Perm) -> bool:
+    """짝순열 여부 — 전위(inversion) 개수의 우열로 판정."""
+    return sum(1 for i in range(4) for j in range(i + 1, 4) if p[i] > p[j]) % 2 == 0
+
+
+# 교대군 A4(짝순열 전부, 12개) — 2026-07-22, TTA24(S4 전체, 짝+홀 혼합)가 실LB에서
+# TTA8-balanced(BALANCED8=D4, 짝4+홀4 혼합)에 패한 뒤 별도 가설 검증용으로 추가.
+# 가설: "홀순열(원본과 크게 어긋난 배열)이 모델을 헷갈리게 한다"면, 홀순열을 아예 안
+# 쓰는 A4가 D4보다 나을 수 있다. A4도 D4보다 못하면 "홀순열이 문제"라는 가설 자체가
+# 기각되고 "8 근처가 최적점"이라는 쪽으로 기운다(BALANCED8 주석 §Sylow-2 계열 참고).
+# ⚠️ V(4)→D4(8)→S4(24) 계열의 자연스러운 연장이 아니라 별개 구조 — D4는 짝4+홀4가
+# 섞여 있어 A4(짝12 전부)의 부분집합도 상위집합도 아니다(교집합은 짝순열 쪽 일부뿐).
+# 균형 확인: A4는 {0..3}에 전이적으로 작용하고 점 안정자군 크기가 3(항등+3-사이클 2개)
+# 이므로, 궤도-안정자 코셋 분해로 각 입력이 각 슬롯을 정확히 |A4|/4=3회 방문한다
+# (짝수/홀수 어느 쪽만 모아도 대칭이라 우연이 아님 — property test로 검증).
+ALTERNATING12: tuple[perm.Perm, ...] = tuple(p for p in perm.PERMS24 if _is_even_permutation(p))
+
+
 def tta_shuffles(cfg: TTAConfig) -> list[perm.Perm]:
     """항등 + (n_views-1)개의 서로 다른 랜덤 셔플. 결정적.
 
     예외: n_views==4 는 균형 Klein 세트(위 BALANCED4)를 반환 — Ver11과 동일 규약.
     예외: n_views==24 는 무조건 완전균형 BALANCED24(=S4 전체)를 반환 — n=24를 과거에
       쓴 적이 없어 재현성 우려가 없으므로 n=4와 같은 방식으로 무조건 하이재킹.
+    예외: n_views==12 는 무조건 ALTERNATING12(=A4, 짝순열 전부)를 반환 — n=12도 과거에
+      쓴 적이 없어 n=24와 동일한 이유로 무조건 하이재킹.
     예외: balanced8=True 는 n_views==8에서 BALANCED8 반환(예산 축소로 n_views==1이
       되면 항등만 — 기존 축소 경로와 동일 동작). 그 외 n_views와의 조합은 에러.
     다른 n은 기존 시드셔플 경로와 바이트 동일(TTA3 재현성 보존).
     """
     if cfg.n_views == 24:
         return list(BALANCED24)
+    if cfg.n_views == 12:
+        return list(ALTERNATING12)
     if cfg.balanced8:
         if cfg.n_views == 8:
             return list(BALANCED8)

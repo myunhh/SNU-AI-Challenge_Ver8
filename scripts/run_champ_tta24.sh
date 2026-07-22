@@ -12,9 +12,8 @@
 set -u
 cd "$(dirname "$0")/.."
 export PYTHONPATH=$PWD/src
-export LD_LIBRARY_PATH=$HOME/anaconda3/envs/py3_11/lib
-PY=$HOME/anaconda3/envs/py3_11/bin/python
-MODEL=/home/yhmin/model/hub/Qwen3-VL-32B-Instruct-bnb-4bit
+PY=python3
+MODEL=unsloth/Qwen3-VL-32B-Instruct-bnb-4bit
 ADAPTER=runs/DPO-checkpoint-600
 OUT=runs/test_champ_tta24
 
@@ -26,4 +25,4 @@ echo "[tta24] ===== 완전균형 24뷰(S4 전체) 시작 $(date '+%F %T') ====="
     --strategy score24 --tta 24 \
     --model-id "$MODEL" --adapter "$ADAPTER" \
     --out "$OUT"
-echo "[tta24] 완료 $(date '+%F %T') — 채점: python ../grade/grade.py $OUT/submission.csv"
+echo "[tta24] 완료 $(date '+%F %T') — 채점: python3 ../grade/grade.py $OUT/submission.csv"
